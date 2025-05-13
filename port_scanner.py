@@ -5,13 +5,50 @@ import time
 import os
 import struct
 import select
-from typing import List, Tuple, Optional
+import importlib.util
+import glob
+from typing import List, Tuple, Optional, Dict, Any
+
+class ScriptManager:
+    def __init__(self):
+        self.scripts = []
+        
+    def load_scripts(self, script_dir="scripts"):
+        if not os.path.exists(script_dir):
+            return
+            
+        for script_path in glob.glob(f"{script_dir}/*.py"):
+            try:
+                spec = importlib.util.spec_from_file_location(
+                    os.path.basename(script_path)[:-3], 
+                    script_path
+                )
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+                self.scripts.append(module)
+            except Exception as e:
+                print(f"加载脚本 {script_path} 失败: {e}")
+
+    def run_scripts(self, target: str, port: int, service: str) -> Dict[str, Any]:
+        results = {}
+        for script in self.scripts:
+            try:
+                if hasattr(script, "run"):
+                    result = script.run(target, port, service)
+                    if result:
+                        results[script.__name__] = result
+            except Exception as e:
+                print(f"执行脚本 {script.__name__} 失败: {e}")
+        return results
 
 class PortScanner:
-    def __init__(self, target: str, timeout: float = 1.0):
+    def __init__(self, target: str, timeout: float = 1.0, script_dir: str = None):
         self.target = target
         self.timeout = timeout
         self.open_ports = []
+        self.script_manager = ScriptManager()
+        if script_dir:
+            self.script_manager.load_scripts(script_dir)
         
     def host_discovery(self) -> bool:
         """Check if host is alive using ICMP ping and ARP (for local networks)"""
@@ -190,11 +227,13 @@ if __name__ == "__main__":
     parser.add_argument("-u", "--udp", help="Scan UDP ports instead of TCP", action="store_true")
     parser.add_argument("-s", "--syn", help="Use SYN scan (requires admin)", action="store_true")
     parser.add_argument("--service", help="Detect services on open ports", action="store_true")
+    parser.add_argument("--script", help="Enable script scanning", action="store_true")
+    parser.add_argument("--script-dir", help="Custom script directory", default="scripts")
     args = parser.parse_args()
 
     start_port, end_port = map(int, args.ports.split("-"))
     
-    scanner = PortScanner(args.target, args.timeout)
+    scanner = PortScanner(args.target, args.timeout, args.script_dir if args.script else None)
     
     # Host discovery
     if not args.skip_ping:
@@ -216,3 +255,10 @@ if __name__ == "__main__":
             print(f"  {port}/tcp - {service[:100]}...")  # Truncate long banners
         else:
             print(f"  {port}/tcp")
+            
+        if args.script:
+            script_results = scanner.script_manager.run_scripts(args.target, port, service)
+            for script_name, result in script_results.items():
+                print(f"    [脚本 {script_name}]")
+                for k, v in result.items():
+                    print(f"      {k}: {v}")
